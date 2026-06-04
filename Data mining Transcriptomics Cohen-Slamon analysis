@@ -1,0 +1,316 @@
+# ============================================
+# Astro VS Endfeet RNAseq (Data from Cohen-Salmon)
+# ============================================
+
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ============================================
+# FILE PATHS
+# ============================================
+RNA_FILE = "/Users/antina/Desktop/NeuroPSI/data mining/TableS1-listedefinitive-CohenSalmon2025-9-11.xlsx"
+STAT3_FILE = "/Users/antina/Desktop/NeuroPSI/data mining/STAT3_full_pathway_plus_receptors_mouse.xlsx"
+
+OUT_TABLE = "/Users/antina/Desktop/NeuroPSI/data mining/STAT3_RNAseq_Astro_vs_PvAP_filtered_2.xlsx"
+OUT_BARPLOT = "/Users/antina/Desktop/NeuroPSI/data mining/STAT3_RNAseq_Astro_vs_PvAP_barplot_2.png"
+OUT_VOLCANO = "/Users/antina/Desktop/NeuroPSI/data mining/STAT3_RNAseq_Astro_vs_PvAP_volcano.png"
+OUT_VOLCANO_POINTS_ONLY = "/Users/antina/Desktop/NeuroPSI/data mining/STAT3_RNAseq_Astro_vs_PvAP_volcano_points_only.png"
+
+# ============================================
+# HELPERS
+# ============================================
+def clean_gene(x):
+    if pd.isna(x):
+        return np.nan
+    s = str(x).strip()
+    if s == "":
+        return np.nan
+    s = s.split(";")[0]
+    s = s.split(" ")[0]
+    return s.upper()
+
+def p_to_stars(p):
+    if pd.isna(p):
+        return ""
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return ""
+
+# ============================================
+# LOAD RNAseq TABLE
+# ============================================
+df = pd.read_excel(RNA_FILE, header=4)
+df.columns = df.columns.str.strip()
+
+print("RNAseq columns:")
+print(df.columns.tolist())
+
+# Exact columns from your file
+gene_col = "Gene Symbol"
+astro_pct_col = "% of Astro Cortex Cells (Holt)"
+astro_col = "Mean Astro"
+pvap_col = "Mean PvAP"
+reg_col = "Regulation"
+padj_col = "Adjusted P-Value"
+
+required_cols = [gene_col, astro_pct_col, astro_col, pvap_col, reg_col, padj_col]
+for col in required_cols:
+    if col not in df.columns:
+        raise ValueError(f"Missing expected column in RNAseq file: {col}")
+
+# ============================================
+# CLEAN GENE SYMBOLS
+# ============================================
+df["Gene_clean"] = df[gene_col].apply(clean_gene)
+
+# numeric conversion
+for c in [astro_pct_col, astro_col, pvap_col, padj_col]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+
+# ============================================
+# LOAD STAT3 LIST
+# ============================================
+stat3 = pd.read_excel(STAT3_FILE)
+stat3.columns = stat3.columns.str.strip()
+
+possible_stat3_cols = [
+    "Gene",
+    "Gene_symbol",
+    "Gene Symbol",
+    "Genes",
+    "Mouse_gene_symbol",
+    "Receptor_gene_symbol_mouse"
+]
+
+stat3_gene_col = None
+for c in possible_stat3_cols:
+    if c in stat3.columns:
+        stat3_gene_col = c
+        break
+
+if stat3_gene_col is None:
+    stat3_gene_col = stat3.columns[0]
+
+print("\nUsing STAT3 gene column:", stat3_gene_col)
+
+stat3_genes = set(
+    stat3[stat3_gene_col]
+    .dropna()
+    .astype(str)
+    .str.strip()
+    .str.upper()
+)
+
+# prepare STAT3 annotation columns
+stat3 = stat3.copy()
+stat3["Gene_clean"] = stat3[stat3_gene_col].astype(str).str.strip().str.upper()
+
+# try to find category and role columns automatically
+possible_category_cols = ["Category", "category", "Gene category", "Type"]
+possible_role_cols = ["Role", "role", "Function", "Gene role", "Role_in_JAK_STAT"]
+
+category_col = next((c for c in possible_category_cols if c in stat3.columns), None)
+role_col = next((c for c in possible_role_cols if c in stat3.columns), None)
+
+print("Using STAT3 category column:", category_col)
+print("Using STAT3 role column:", role_col)
+
+stat3_annot_cols = ["Gene_clean"]
+if category_col is not None:
+    stat3_annot_cols.append(category_col)
+if role_col is not None:
+    stat3_annot_cols.append(role_col)
+
+stat3_annot = stat3[stat3_annot_cols].drop_duplicates(subset="Gene_clean")
+
+# ============================================
+# FILTER TO STAT3-RELEVANT GENES
+# ============================================
+df_stat3 = df[df["Gene_clean"].isin(stat3_genes)].copy()
+
+# merge STAT3 category / role annotations
+df_stat3 = df_stat3.merge(stat3_annot, on="Gene_clean", how="left")
+
+if df_stat3.shape[0] == 0:
+    raise ValueError("No STAT3-relevant genes found in the RNAseq file.")
+
+print("STAT3-relevant genes found:", df_stat3.shape[0])
+
+# ============================================
+# PREPARE OUTPUT TABLE
+# ============================================
+df_stat3["stars"] = df_stat3[padj_col].apply(p_to_stars)
+df_stat3["neglog10_padj"] = -np.log10(df_stat3[padj_col].replace(0, np.nan))
+
+# display values for plotting
+df_stat3["Astro_display_log2"] = np.log2(df_stat3[astro_col] + 1)
+df_stat3["PvAP_display_log2"] = np.log2(df_stat3[pvap_col] + 1)
+
+# display log2 fold change
+df_stat3["display_log2FC_PvAP_vs_Astro"] = df_stat3["PvAP_display_log2"] - df_stat3["Astro_display_log2"]
+
+# Enrichment direction
+df_stat3["Enriched_in"] = np.where(
+    df_stat3["display_log2FC_PvAP_vs_Astro"] > 0, "PvAP",
+    np.where(df_stat3["display_log2FC_PvAP_vs_Astro"] < 0, "Astro", "Equal")
+)
+
+base_cols = [
+    "Gene_clean",
+    gene_col,
+    astro_pct_col,
+    astro_col,
+    pvap_col,
+    "Astro_display_log2",
+    "PvAP_display_log2",
+    reg_col,
+    padj_col,
+    "stars",
+    "neglog10_padj",
+    "display_log2FC_PvAP_vs_Astro",
+    "Enriched_in"
+]
+
+base_cols = [c for c in base_cols if c in df_stat3.columns]
+
+annot_cols = []
+if category_col is not None and category_col in df_stat3.columns:
+    annot_cols.append(category_col)
+if role_col is not None and role_col in df_stat3.columns:
+    annot_cols.append(role_col)
+
+df_stat3 = df_stat3[base_cols + annot_cols].copy()
+
+# add 2 blank columns before category/role
+df_stat3["Blank_1"] = ""
+df_stat3["Blank_2"] = ""
+
+final_cols = base_cols + ["Blank_1", "Blank_2"] + annot_cols
+df_stat3 = df_stat3[final_cols]
+
+# sort by adjusted p-value then fold change
+df_stat3 = df_stat3.sort_values([padj_col, "display_log2FC_PvAP_vs_Astro"], ascending=[True, False])
+
+rename_map = {"Blank_1": "", "Blank_2": " "}
+df_stat3 = df_stat3.rename(columns=rename_map)
+
+# save table
+df_stat3.to_excel(OUT_TABLE, index=False)
+
+# ============================================
+# BAR PLOT
+# same style as Astro vs Endfeet
+# ============================================
+bar_df = df_stat3[[
+    "Gene_clean",
+    "Astro_display_log2",
+    "PvAP_display_log2",
+    "stars"
+]].copy()
+
+bar_df = bar_df.sort_values("PvAP_display_log2", ascending=False).reset_index(drop=True)
+
+x = np.arange(len(bar_df))
+width = 0.38
+
+plt.figure(figsize=(max(10, len(bar_df) * 0.4), 6))
+
+plt.bar(x - width/2, bar_df["Astro_display_log2"], width=width, label="Astro")
+plt.bar(x + width/2, bar_df["PvAP_display_log2"], width=width, label="PvAP")
+
+for i, row in bar_df.iterrows():
+    ymax = max(row["Astro_display_log2"], row["PvAP_display_log2"])
+    if row["stars"] != "":
+        plt.text(i, ymax + 0.1, row["stars"], ha="center", va="bottom", fontsize=10)
+
+plt.xticks(x, bar_df["Gene_clean"], rotation=90)
+plt.ylabel("Mean expression (log2 display)")
+plt.title("STAT3-relevant RNA-seq genes: Astro vs PvAP")
+plt.legend()
+plt.tight_layout()
+plt.savefig(OUT_BARPLOT, dpi=300)
+plt.close()
+
+# ============================================
+# VOLCANO PLOT (with labels)
+# ============================================
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    df_stat3["display_log2FC_PvAP_vs_Astro"],
+    df_stat3["neglog10_padj"],
+    s=50
+)
+
+for _, row in df_stat3.iterrows():
+    label = str(row["Gene_clean"])
+    if row["stars"] != "":
+        label = f"{label} {row['stars']}"
+    plt.text(
+        row["display_log2FC_PvAP_vs_Astro"],
+        row["neglog10_padj"],
+        label,
+        fontsize=8
+    )
+
+plt.axvline(1, linestyle="--", linewidth=1)
+plt.axvline(-1, linestyle="--", linewidth=1)
+plt.axhline(-np.log10(0.05), linestyle="--", linewidth=1)
+
+plt.xlabel("Display log2FC (PvAP vs Astro)")
+plt.ylabel("-log10 adjusted p-value")
+plt.title("STAT3-relevant RNA-seq genes: Astro vs PvAP")
+plt.tight_layout()
+plt.savefig(OUT_VOLCANO, dpi=300)
+plt.close()
+
+# ============================================
+# VOLCANO PLOT (points only)
+# ============================================
+plt.figure(figsize=(8, 6))
+
+plt.scatter(
+    df_stat3["display_log2FC_PvAP_vs_Astro"],
+    df_stat3["neglog10_padj"],
+    s=50
+)
+
+plt.axvline(1, linestyle="--", linewidth=1)
+plt.axvline(-1, linestyle="--", linewidth=1)
+plt.axhline(-np.log10(0.05), linestyle="--", linewidth=1)
+
+plt.xlabel("Display log2FC (PvAP vs Astro)")
+plt.ylabel("-log10 adjusted p-value")
+plt.title("STAT3-relevant RNA-seq genes: Astro vs PvAP (points only)")
+plt.tight_layout()
+plt.savefig(OUT_VOLCANO_POINTS_ONLY, dpi=300)
+plt.close()
+
+# ============================================
+# SUMMARY
+# ============================================
+print("\nSaved:")
+print(OUT_TABLE)
+print(OUT_BARPLOT)
+print(OUT_VOLCANO)
+print(OUT_VOLCANO_POINTS_ONLY)
+
+print("\nPreview:")
+preview_cols = [
+    "Gene_clean",
+    astro_pct_col,
+    astro_col,
+    pvap_col,
+    reg_col,
+    padj_col,
+    "stars",
+    "Enriched_in"
+]
+preview_cols = [c for c in preview_cols if c in df_stat3.columns]
+print(df_stat3[preview_cols].head(20))
